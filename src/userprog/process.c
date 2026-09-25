@@ -14,21 +14,39 @@
 #include "threads/flags.h"
 #include "threads/init.h"
 #include "threads/interrupt.h"
+#include "threads/malloc.h"
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "userprog/syscall.h"
+
+/* Most words we accept on one command line. */
+#define MAX_ARGS 64
+
+/* Stuff process_execute() hands over to the new thread. */
+struct start_info
+  {
+    char *cmd_line;                     /* Page with a copy of the command line. */
+    struct child_status *cs;            /* Record shared with the parent. */
+  };
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+static bool push_arguments (int argc, char **argv, void **esp);
+static void release_child_status (struct child_status *cs);
 
 /* Starts a new thread running a user program loaded from
-   FILENAME.  The new thread may be scheduled (and may even exit)
-   before process_execute() returns.  Returns the new process's
-   thread id, or TID_ERROR if the thread cannot be created. */
+   FILENAME.  Unlike the original version, this waits until the
+   child has finished loading, so it can return TID_ERROR when
+   the program could not be loaded. */
 tid_t
-process_execute (const char *file_name) 
+process_execute (const char *file_name)
 {
   char *fn_copy;
+  char prog_name[16];
+  char *name, *save_ptr;
+  struct start_info info;
+  struct child_status *cs;
   tid_t tid;
 
   /* Make a copy of FILE_NAME.
@@ -38,32 +56,94 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  /* thread name is only the program name, not the whole command line */
+  strlcpy (prog_name, file_name, sizeof prog_name);
+  name = strtok_r (prog_name, " ", &save_ptr);
+  if (name == NULL)
+    {
+      palloc_free_page (fn_copy);
+      return TID_ERROR;
+    }
+
+  /* record the parent keeps to wait on this child later */
+  cs = malloc (sizeof *cs);
+  if (cs == NULL)
+    {
+      palloc_free_page (fn_copy);
+      return TID_ERROR;
+    }
+  cs->exit_status = -1;
+  cs->load_success = false;
+  cs->ref_cnt = 2;
+  sema_init (&cs->load_sema, 0);
+  sema_init (&cs->exit_sema, 0);
+
+  info.cmd_line = fn_copy;
+  info.cs = cs;
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (name, PRI_DEFAULT, start_process, &info);
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+    {
+      palloc_free_page (fn_copy);
+      free (cs);
+      return TID_ERROR;
+    }
+
+  /* wait till the child tells us whether load() worked.
+     INFO lives on our stack, so we must not return before this. */
+  sema_down (&cs->load_sema);
+  if (!cs->load_success)
+    {
+      release_child_status (cs);
+      return TID_ERROR;
+    }
+
+  cs->tid = tid;
+  list_push_back (&thread_current ()->children, &cs->elem);
   return tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *info_)
 {
-  char *file_name = file_name_;
+  struct start_info *info = info_;
+  struct thread *cur = thread_current ();
+  char *cmd_line = info->cmd_line;
+  char *argv[MAX_ARGS];
+  char *token, *save_ptr;
+  int argc = 0;
   struct intr_frame if_;
   bool success;
+
+  cur->child_status = info->cs;
+
+  /* split the command line into words, many spaces count as one */
+  token = strtok_r (cmd_line, " ", &save_ptr);
+  while (token != NULL && argc < MAX_ARGS)
+    {
+      argv[argc++] = token;
+      token = strtok_r (NULL, " ", &save_ptr);
+    }
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+  success = (token == NULL && argc > 0
+             && load (argv[0], &if_.eip, &if_.esp)
+             && push_arguments (argc, argv, &if_.esp));
+
+  /* let the parent know how it went, then free the command line */
+  cur->child_status->load_success = success;
+  sema_up (&cur->child_status->load_sema);
+  palloc_free_page (cmd_line);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
+  if (!success)
     thread_exit ();
 
   /* Start the user process by simulating a return from an
@@ -81,15 +161,50 @@ start_process (void *file_name_)
    exception), returns -1.  If TID is invalid or if it was not a
    child of the calling process, or if process_wait() has already
    been successfully called for the given TID, returns -1
-   immediately, without waiting.
-
-   This function will be implemented in problem 2-2.  For now, it
-   does nothing. */
+   immediately, without waiting. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid)
 {
-  while(1);
+  struct thread *cur = thread_current ();
+  struct list_elem *e;
+
+  for (e = list_begin (&cur->children); e != list_end (&cur->children);
+       e = list_next (e))
+    {
+      struct child_status *cs = list_entry (e, struct child_status, elem);
+      if (cs->tid == child_tid)
+        {
+          int status;
+
+          /* sleep till the child exits (returns at once if it already did) */
+          sema_down (&cs->exit_sema);
+          status = cs->exit_status;
+
+          /* drop it from the list, so a second wait gives -1 */
+          list_remove (&cs->elem);
+          release_child_status (cs);
+          return status;
+        }
+    }
+
+  /* not our child, or already waited for */
   return -1;
+}
+
+/* Drops one reference to CS and frees it once neither the
+   parent nor the child needs it anymore. */
+static void
+release_child_status (struct child_status *cs)
+{
+  enum intr_level old_level;
+  int ref_cnt;
+
+  old_level = intr_disable ();
+  ref_cnt = --cs->ref_cnt;
+  intr_set_level (old_level);
+
+  if (ref_cnt == 0)
+    free (cs);
 }
 
 /* Free the current process's resources. */
@@ -98,6 +213,35 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  /* only user processes have a child_status, kernel threads stay quiet */
+  if (cur->child_status != NULL)
+    {
+      printf ("%s: exit(%d)\n", cur->name, cur->exit_status);
+
+      /* hand the status to the parent and wake it up if it waits */
+      cur->child_status->exit_status = cur->exit_status;
+      sema_up (&cur->child_status->exit_sema);
+      release_child_status (cur->child_status);
+      cur->child_status = NULL;
+    }
+
+  /* our children don't need us to keep their records anymore */
+  while (!list_empty (&cur->children))
+    {
+      struct list_elem *e = list_pop_front (&cur->children);
+      release_child_status (list_entry (e, struct child_status, elem));
+    }
+
+  /* close every open file, and the executable (allows writes again) */
+  close_all_files ();
+  if (cur->exec_file != NULL)
+    {
+      lock_acquire (&filesys_lock);
+      file_close (cur->exec_file);
+      lock_release (&filesys_lock);
+      cur->exec_file = NULL;
+    }
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -216,6 +360,10 @@ load (const char *file_name, void (**eip) (void), void **esp)
   bool success = false;
   int i;
 
+  /* file system is shared with running syscalls, so lock it.
+     Taken first so every "goto done" can release it. */
+  lock_acquire (&filesys_lock);
+
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
   if (t->pagedir == NULL) 
@@ -311,9 +459,16 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
   success = true;
 
+  /* keep the executable open so nobody can write to it while we run.
+     process_exit() closes it. */
+  file_deny_write (file);
+  t->exec_file = file;
+
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
+  if (!success)
+    file_close (file);
+  lock_release (&filesys_lock);
   return success;
 }
 
@@ -438,11 +593,71 @@ setup_stack (void **esp)
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
-        *esp = PHYS_BASE - 12;
+        *esp = PHYS_BASE;
       else
         palloc_free_page (kpage);
     }
   return success;
+}
+
+/* Pushes the ARGC words in ARGV onto the user stack at *ESP, laid
+   out the way main (int argc, char *argv[]) expects them:
+
+        argv strings, word-align padding, argv[argc] = NULL,
+        argv[argc-1] ... argv[0], argv, argc, fake return address
+
+   ARGV entries are overwritten with the user addresses of the
+   strings.  Returns false if everything doesn't fit in the one
+   stack page. */
+static bool
+push_arguments (int argc, char **argv, void **esp)
+{
+  uint8_t *sp = *esp;
+  char **argv_addr;
+  size_t total = 0;
+  int i;
+
+  /* check it all fits before writing anything */
+  for (i = 0; i < argc; i++)
+    total += strlen (argv[i]) + 1;
+  total = ROUND_UP (total, sizeof (char *)) + (argc + 4) * sizeof (char *);
+  if (total > PGSIZE)
+    return false;
+
+  /* the strings themselves, last one first */
+  for (i = argc - 1; i >= 0; i--)
+    {
+      size_t len = strlen (argv[i]) + 1;
+      sp -= len;
+      memcpy (sp, argv[i], len);
+      argv[i] = (char *) sp;
+    }
+
+  /* word-align, word accesses are faster that way */
+  sp = (uint8_t *) ROUND_DOWN ((uintptr_t) sp, sizeof (char *));
+
+  /* argv[argc] must be a null pointer */
+  sp -= sizeof (char *);
+  *(char **) sp = NULL;
+
+  /* pointers to the strings, argv[0] ends up lowest */
+  for (i = argc - 1; i >= 0; i--)
+    {
+      sp -= sizeof (char *);
+      *(char **) sp = argv[i];
+    }
+  argv_addr = (char **) sp;
+
+  /* argv, argc and a fake return address */
+  sp -= sizeof (char **);
+  *(char ***) sp = argv_addr;
+  sp -= sizeof (int);
+  *(int *) sp = argc;
+  sp -= sizeof (void *);
+  *(void **) sp = NULL;
+
+  *esp = sp;
+  return true;
 }
 
 /* Adds a mapping from user virtual address UPAGE to kernel

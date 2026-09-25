@@ -81,6 +81,8 @@ typedef int tid_t;
    ready state is on the run queue, whereas only a thread in the
    blocked state is on a semaphore wait list. */
 struct lock;
+struct file;
+struct child_status;
 
 struct thread
   {
@@ -105,6 +107,14 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
+    int exit_status;                    /* Status printed on exit. */
+    struct child_status *child_status;  /* Our record shared with parent. */
+    struct list children;               /* Records of our children. */
+    struct file *exec_file;             /* Running executable (write denied). */
+
+    /* Owned by userprog/syscall.c. */
+    struct list fd_list;                /* Open files of this process. */
+    int next_fd;                        /* Next fd number to hand out. */
 #endif
 
     /* Owned by thread.c. */

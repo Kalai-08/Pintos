@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wsl -l -q)",
+      "Bash(docker info *)"
+    ]
+  }
+}

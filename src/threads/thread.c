@@ -532,6 +532,14 @@ init_thread (struct thread *t, const char *name, int priority)
   t->wait_on_lock = NULL;
   t->nice = 0;
   t->recent_cpu = 0;
+#ifdef USERPROG
+  t->exit_status = -1;
+  t->child_status = NULL;
+  list_init (&t->children);
+  t->exec_file = NULL;
+  list_init (&t->fd_list);
+  t->next_fd = 2;
+#endif
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
