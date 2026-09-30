@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(wsl -l -q)",
-      "Bash(docker info *)"
+      "Bash(docker info *)",
+      "Bash(cd \"D:/GitHub/Pintos_Project_2/Pintos\" && ls; ls .. ; git grep -n -i \"bochs\\\\|qemu\" -- 'Dockerfile*' '*.md' '*.sh' 2>/dev/null | head -20; docker ps --format '{{.Names}} {{.Image}}' 2>&1 | head)",
+      "Read(//d/GitHub/Pintos_Project_2/**)"
     ]
   }
 }

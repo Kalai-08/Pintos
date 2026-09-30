@@ -15,9 +15,9 @@
 /* one open file of a process, kept in thread's fd_list */
 struct file_desc
   {
-    int fd;                             /* Number the user sees. */
-    struct file *file;                  /* The open file. */
-    struct list_elem elem;              /* Elem in thread's fd_list. */
+    int fd; /* Number the user sees.*/
+    struct file *file; /* The open file.*/
+    struct list_elem elem; /* Elem in thread's fd_list.*/
   };
 
 struct lock filesys_lock;
@@ -29,8 +29,7 @@ static void check_string (const char *str);
 static int get_syscall_arg (struct intr_frame *f, int index);
 static struct file_desc *find_file_desc (int fd);
 
-/* it returns true if UADDR is a valid user virtual address
-   that is really mapped in our page directory */
+/*returns true if uaddr is a valid,mapped user virtual address*/
 static bool
 is_valid_ptr (const void *uaddr)
 {
@@ -101,8 +100,7 @@ find_file_desc (int fd)
   return NULL;
 }
 
-/* sets our exit status and terminates. process_exit() prints the
-   "name: exit(status)" line, so kills by the kernel print it too */
+/*sets exit status and terminates,process_exit()prints the exit line so kernel kills print it too*/
 void
 sys_exit (int status)
 {

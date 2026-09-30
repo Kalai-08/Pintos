@@ -4,8 +4,7 @@
 #include <debug.h>
 #include "threads/synch.h"
 
-/* One big lock around the whole file system, since the base
-   file system is not safe to use from many threads at once. */
+/*one lock around the whole file system,since it isn't safe for many threads at once*/
 extern struct lock filesys_lock;
 
 void syscall_init (void);
