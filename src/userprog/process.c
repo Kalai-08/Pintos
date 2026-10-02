@@ -136,9 +136,14 @@ start_process (void *info_)
   sema_up (&cur->child_status->load_sema);
   palloc_free_page (cmd_line);
 
-  /* If load failed, quit. */
+  /* If load failed, quit.  The parent only ever sees -1 from exec,
+     so drop our reference here and skip the exit message. */
   if (!success)
-    thread_exit ();
+    {
+      release_child_status (cur->child_status);
+      cur->child_status = NULL;
+      thread_exit ();
+    }
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -211,11 +216,7 @@ process_exit (void)
     {
       printf ("%s: exit(%d)\n", cur->name, cur->exit_status);
 
-      /*hand the status to the parent and wake it up if it waits*/
       cur->child_status->exit_status = cur->exit_status;
-      sema_up (&cur->child_status->exit_sema);
-      release_child_status (cur->child_status);
-      cur->child_status = NULL;
     }
 
   /*our children don't need us to keep their records anymore*/
@@ -250,6 +251,15 @@ process_exit (void)
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
+    }
+
+  /*only now hand the status to the parent and wake it up, so that
+    everything we held is already free when wait() returns*/
+  if (cur->child_status != NULL)
+    {
+      sema_up (&cur->child_status->exit_sema);
+      release_child_status (cur->child_status);
+      cur->child_status = NULL;
     }
 }
 
