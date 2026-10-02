@@ -218,6 +218,10 @@ lock_acquire (struct lock *lock)
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
 
+  /* Checking the holder and registering as a donor must be atomic
+     with respect to lock_release(), or we could be left in a
+     donations list that nobody cleans up. */
+  enum intr_level old_level = intr_disable ();
   if (lock->holder != NULL)
     {
       cur->wait_on_lock = lock;
@@ -236,6 +240,7 @@ lock_acquire (struct lock *lock)
             donee = l->holder;
         }
     }
+  intr_set_level (old_level);
 
   sema_down (&lock->semaphore);
 
@@ -275,6 +280,10 @@ lock_release (struct lock *lock)
 
   struct thread *cur = thread_current ();
 
+  /* Dropping donations and clearing the holder must be atomic with
+     respect to lock_acquire(). */
+  enum intr_level old_level = intr_disable ();
+
   /* Remove all donations related to this lock from our donations list. */
   struct list_elem *e = list_begin (&cur->donations);
   while (e != list_end (&cur->donations))
@@ -298,6 +307,7 @@ lock_release (struct lock *lock)
     }
 
   lock->holder = NULL;
+  intr_set_level (old_level);
   sema_up (&lock->semaphore);
 }
 
